@@ -14,7 +14,21 @@ local function formatNumber(amount)
     end
 end
 
-local function readVault(progress)
+local function sameSnapshot(first, second)
+    if not first or first.capacity ~= second.capacity or #first.items ~= #second.items then
+        return false
+    end
+    for i, item in ipairs(first.items) do
+        local other = second.items[i]
+        if item.slot ~= other.slot or item.name ~= other.name or item.count ~= other.count
+            or item.maxCount ~= other.maxCount then
+            return false
+        end
+    end
+    return true
+end
+
+local function readVault(progress, previousSnapshot, previousStats, stackLimitCache)
     progress.phase = "Reading vault"
     progress.total = 0
     progress.processed = 0
@@ -33,12 +47,26 @@ local function readVault(progress)
         return nil, "Invalid vault capacity or contents"
     end
 
-    local itemCount = 0
-    for _ in pairs(items) do
-        itemCount = itemCount + 1
+    local snapshot = { capacity = capacity, items = {} }
+    for slot, item in pairs(items) do
+        snapshot.items[#snapshot.items + 1] = {
+            slot = slot,
+            name = item.name,
+            count = item.count,
+            maxCount = item.maxCount,
+        }
     end
-    progress.phase = "Checking stack limits"
-    progress.total = itemCount
+    table.sort(snapshot.items, function(a, b) return a.slot < b.slot end)
+
+    if previousStats and sameSnapshot(previousSnapshot, snapshot) then
+        progress.phase = "No changes"
+        progress.total = #snapshot.items
+        progress.processed = progress.total
+        return previousStats, snapshot
+    end
+
+    progress.phase = "Updating inventory"
+    progress.total = #snapshot.items
 
     local stats = {
         capacity = capacity,
@@ -50,31 +78,33 @@ local function readVault(progress)
         largestStack = 0,
     }
     local itemTypes = {}
-    local stackLimits = {}
-    for slot, item in pairs(items) do
+    for index, entry in ipairs(snapshot.items) do
+        progress.processed = index
+        local item = items[entry.slot]
         stats.used = stats.used + 1
         stats.total = stats.total + item.count
         stats.largestStack = math.max(stats.largestStack, item.count)
         itemTypes[item.name] = true
 
-        local stackLimit = stackLimits[item.name]
+        local stackLimit = stackLimitCache[item.name]
         if stackLimit == nil then
             stackLimit = item.maxCount
             if (type(stackLimit) ~= "number" or stackLimit <= 0)
                 and type(vault.getItemDetail) == "function" then
-                local okDetail, detail = pcall(vault.getItemDetail, slot)
+                local okDetail, detail = pcall(vault.getItemDetail, entry.slot)
                 if okDetail and detail then stackLimit = detail.maxCount end
+            end
+            if (type(stackLimit) ~= "number" or stackLimit <= 0)
+                and type(vault.getItemLimit) == "function" then
+                local okLimit, limit = pcall(vault.getItemLimit, entry.slot)
+                if okLimit then stackLimit = limit end
             end
             if type(stackLimit) ~= "number" or stackLimit <= 0 then
                 stackLimit = false
             end
-            stackLimits[item.name] = stackLimit
+            stackLimitCache[item.name] = stackLimit
         end
 
-        if stackLimit == false and type(vault.getItemLimit) == "function" then
-            local okLimit, limit = pcall(vault.getItemLimit, slot)
-            if okLimit then stackLimit = limit end
-        end
         if type(stackLimit) == "number" and stackLimit > 0 then
             if item.count >= stackLimit then
                 stats.fullSlots = stats.fullSlots + 1
@@ -82,23 +112,68 @@ local function readVault(progress)
         else
             stats.fullSlotsKnown = false
         end
-        progress.processed = progress.processed + 1
     end
     for _ in pairs(itemTypes) do
         stats.types = stats.types + 1
     end
     progress.phase = "Finishing"
-    return stats
+    return stats, snapshot
 end
 
-local function draw(monitor, stats, problem)
+local function drawFooter(monitor, progress, frame)
     local width, height = monitor.getSize()
+    if height < 1 then return end
+
+    local text
+    local foreground = colors.lightGray
+    if progress.problem then
+        text = "Update failed: " .. progress.problem
+        foreground = colors.red
+    elseif progress.done then
+        text = "Up to date"
+        foreground = colors.lime
+    elseif progress.total > 0 then
+        local percent = math.floor(progress.processed / progress.total * 100)
+        text = string.format("%s %d%%  %s/%s slots", progress.phase, percent,
+            formatNumber(progress.processed), formatNumber(progress.total))
+        foreground = colors.yellow
+    else
+        local spinner = { "|", "/", "-", "\\" }
+        text = "Checking vault " .. spinner[frame % #spinner + 1]
+        foreground = colors.yellow
+    end
+
+    local textRow = height >= 2 and height - 1 or height
+    monitor.setCursorPos(1, textRow)
+    monitor.setTextColor(foreground)
+    monitor.setBackgroundColor(colors.black)
+    text = text:sub(1, width)
+    monitor.write(text .. string.rep(" ", width - #text))
+    if height >= 2 then
+        local filled = 0
+        if progress.total > 0 and not progress.done then
+            filled = math.floor(width * progress.processed / progress.total)
+        elseif progress.done and not progress.problem then
+            filled = width
+        end
+        monitor.setCursorPos(1, height)
+        monitor.setBackgroundColor(colors.lime)
+        monitor.write(string.rep(" ", filled))
+        monitor.setBackgroundColor(colors.gray)
+        monitor.write(string.rep(" ", width - filled))
+    end
+    monitor.setBackgroundColor(colors.black)
+end
+
+local function draw(monitor, stats, problem, progress)
+    local width, height = monitor.getSize()
+    local contentHeight = math.max(0, height - 2)
     monitor.setBackgroundColor(colors.black)
     monitor.setTextColor(colors.white)
     monitor.clear()
 
     local function row(y, text, foreground, background)
-        if y < 1 or y > height then return end
+        if y < 1 or y > contentHeight then return end
         monitor.setCursorPos(1, y)
         monitor.setTextColor(foreground or colors.white)
         monitor.setBackgroundColor(background or colors.black)
@@ -162,9 +237,14 @@ local function draw(monitor, stats, problem)
     end
 
     section(1, "ITEM VAULT")
-    if problem then
+    if problem and not stats then
         wrapped(3, problem, colors.red)
         wrapped(4, "Check connection; retrying", colors.lightGray)
+        drawFooter(monitor, progress, 0)
+        return
+    elseif not stats then
+        wrapped(3, "Waiting for first inventory scan", colors.yellow)
+        drawFooter(monitor, progress, 0)
         return
     end
 
@@ -203,9 +283,9 @@ local function draw(monitor, stats, problem)
         segment(colors.gray, emptyWidth)
     end
 
-    if y <= height then
+    if y <= contentHeight then
         drawBarRow(y)
-        if y + 1 <= height then drawBarRow(y + 1) end
+        if y + 1 <= contentHeight then drawBarRow(y + 1) end
         monitor.setBackgroundColor(colors.black)
         y = y + 2
     end
@@ -240,91 +320,51 @@ local function draw(monitor, stats, problem)
     y = metric(y, "Average items per occupied slot", string.format("%.1f", averageStack),
         colors.lightGray)
     metric(y, "Largest stack", formatNumber(stats.largestStack), colors.lightGray)
-end
-
-local function drawCalculating(monitor, progress, frame)
-    local width, height = monitor.getSize()
-    monitor.setBackgroundColor(colors.black)
-    monitor.setTextColor(colors.white)
-    monitor.clear()
-
-    local function row(y, text, foreground, background)
-        if y < 1 or y > height then return end
-        monitor.setCursorPos(1, y)
-        monitor.setTextColor(foreground or colors.white)
-        monitor.setBackgroundColor(background or colors.black)
-        monitor.write(text:sub(1, width))
-    end
-
-    local title = (" VAULT MONITOR "):sub(1, width)
-    row(1, title .. string.rep(" ", width - #title), colors.yellow, colors.gray)
-    row(3, "Calculating inventory...", colors.yellow)
-    row(4, progress.phase, colors.lightGray)
-
-    if progress.total > 0 then
-        local percent = math.floor(progress.processed / progress.total * 100)
-        row(5, string.format("%d%%  %s / %s slots", percent,
-            formatNumber(progress.processed), formatNumber(progress.total)), colors.white)
-        local filled = math.floor(width * progress.processed / progress.total)
-        monitor.setCursorPos(1, 7)
-        monitor.setBackgroundColor(colors.lime)
-        monitor.write(string.rep(" ", filled))
-        monitor.setBackgroundColor(colors.gray)
-        monitor.write(string.rep(" ", width - filled))
-    else
-        row(5, "Waiting for vault data", colors.lightGray)
-        local segmentWidth = math.max(1, math.floor(width / 5))
-        local travel = math.max(1, width - segmentWidth + 1)
-        local start = frame % travel + 1
-        monitor.setCursorPos(1, 7)
-        monitor.setBackgroundColor(colors.gray)
-        monitor.write(string.rep(" ", width))
-        monitor.setCursorPos(start, 7)
-        monitor.setBackgroundColor(colors.lime)
-        monitor.write(string.rep(" ", segmentWidth))
-    end
-    monitor.setBackgroundColor(colors.black)
+    drawFooter(monitor, progress, 0)
 end
 
 local lastMonitorError
+local cachedStats
+local cachedSnapshot
+local stackLimitCache = {}
 
-local function scanWithProgress(monitor)
-    local progress = {
-        phase = "Reading vault",
-        processed = 0,
-        total = 0,
-        done = false,
-    }
-    local stats, problem
+local function scanWithProgress(monitor, progress)
+    progress.phase = "Reading vault"
+    progress.processed = 0
+    progress.total = 0
+    progress.done = false
+    progress.problem = nil
+
+    local stats, snapshot
 
     local function scan()
-        local ok, result, errorMessage = pcall(readVault, progress)
+        local ok, result, newSnapshot = pcall(readVault, progress, cachedSnapshot,
+            cachedStats, stackLimitCache)
         if ok then
-            stats, problem = result, errorMessage
+            if result then
+                stats, snapshot = result, newSnapshot
+            else
+                progress.problem = newSnapshot
+            end
         else
-            problem = "Vault scan failed: " .. tostring(result)
+            progress.problem = "Vault scan failed: " .. tostring(result)
         end
         progress.done = true
     end
 
     local function showProgress()
         local frame = 0
-        local reportedDrawError = false
         while not progress.done do
-            if monitor then
-                local ok, err = pcall(drawCalculating, monitor, progress, frame)
-                if not ok and not reportedDrawError then
-                    print("Cannot draw calculation progress: " .. tostring(err))
-                    reportedDrawError = true
-                end
-            end
+            if monitor then pcall(drawFooter, monitor, progress, frame) end
             frame = frame + 1
             sleep(0.25)
         end
     end
 
+    drawFooter(monitor, progress, 0)
     parallel.waitForAny(scan, showProgress)
-    return stats, problem
+    if progress.problem then return nil, nil, progress.problem end
+    return stats, snapshot
 end
 
 local function refresh()
@@ -334,10 +374,25 @@ local function refresh()
         lastMonitorError = true
         return
     end
-    local stats, problem = scanWithProgress(monitor)
-    local ok = pcall(draw, monitor, stats, problem)
+    local progress = { phase = "Reading vault", processed = 0, total = 0, done = false }
+    local ok, drawError = pcall(draw, monitor, cachedStats, nil, progress)
     if not ok then
-        if not lastMonitorError then print("Cannot draw to monitor; retrying") end
+        if not lastMonitorError then
+            print("Cannot draw vault display: " .. tostring(drawError))
+        end
+        lastMonitorError = true
+    end
+
+    local stats, snapshot, problem = scanWithProgress(monitor, progress)
+    if stats then
+        cachedStats = stats
+        cachedSnapshot = snapshot
+    end
+    progress.done = true
+    progress.problem = problem
+    local drawOk, err = pcall(draw, monitor, cachedStats, problem, progress)
+    if not drawOk then
+        if not lastMonitorError then print("Cannot draw to monitor: " .. tostring(err)) end
         lastMonitorError = true
     else
         lastMonitorError = false
