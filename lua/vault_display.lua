@@ -45,17 +45,17 @@ local function readVault()
         stats.largestStack = math.max(stats.largestStack, item.count)
         itemTypes[item.name] = true
 
-        local stackLimit
+        local stackLimit = item.maxCount
         if type(vault.getItemDetail) == "function" then
             local okDetail, detail = pcall(vault.getItemDetail, slot)
-            if not okDetail then return nil, "Cannot read item details; retrying" end
-            stackLimit = detail and detail.maxCount
+            if okDetail and detail then
+                stackLimit = detail.maxCount
+            end
         end
         if (type(stackLimit) ~= "number" or stackLimit <= 0)
             and type(vault.getItemLimit) == "function" then
             local okLimit, limit = pcall(vault.getItemLimit, slot)
-            if not okLimit then return nil, "Cannot read slot limits; retrying" end
-            stackLimit = limit
+            if okLimit then stackLimit = limit end
         end
         if type(stackLimit) == "number" and stackLimit > 0 then
             if item.count >= stackLimit then
