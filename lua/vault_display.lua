@@ -170,6 +170,17 @@ local function drawFirstScanSpinner(monitor, frame)
     local contentHeight = math.max(0, height - 2)
     if width < 1 or contentHeight < 1 then return end
 
+    local spinner = { "|", "/", "-", "\\" }
+    local message = "Waiting for first inventory scan [" .. spinner[frame % #spinner + 1] .. "]"
+    local messageY = math.min(3, contentHeight)
+    local messageX = math.max(1, math.floor((width - #message) / 2) + 1)
+    monitor.setCursorPos(1, messageY)
+    monitor.setTextColor(colors.yellow)
+    monitor.setBackgroundColor(colors.black)
+    monitor.write(string.rep(" ", width))
+    monitor.setCursorPos(messageX, messageY)
+    monitor.write(message:sub(1, width - messageX + 1))
+
     local centerX = math.floor((width + 1) / 2)
     local centerY = math.floor((contentHeight + 1) / 2)
     local positions = {
@@ -188,20 +199,11 @@ local function drawFirstScanSpinner(monitor, frame)
         monitor.setTextColor(colors.yellow)
         monitor.write("+")
     else
-        local spinner = { "|", "/", "-", "\\" }
         monitor.setCursorPos(centerX, centerY)
         monitor.setTextColor(colors.lime)
         monitor.write(spinner[frame % #spinner + 1])
     end
 
-    local label = "Loading inventory..."
-    local labelY = centerY + 2
-    if labelY <= contentHeight then
-        local labelX = math.max(1, math.floor((width - #label) / 2) + 1)
-        monitor.setCursorPos(labelX, labelY)
-        monitor.setTextColor(colors.lightGray)
-        monitor.write(label:sub(1, width - labelX + 1))
-    end
     monitor.setBackgroundColor(colors.black)
 end
 
@@ -283,7 +285,7 @@ local function draw(monitor, stats, problem, progress)
         drawFooter(monitor, progress, 0)
         return
     elseif not stats then
-        drawFirstScanSpinner(monitor, 0)
+        drawFirstScanSpinner(monitor, progress.frame or 0)
         drawFooter(monitor, progress, 0)
         return
     end
@@ -397,6 +399,7 @@ local function scanWithProgress(monitor, progress)
         while not progress.done do
             if monitor then
                 if not cachedStats then
+                    progress.frame = frame
                     pcall(drawFirstScanSpinner, monitor, frame)
                 end
                 pcall(drawFooter, monitor, progress, frame)
