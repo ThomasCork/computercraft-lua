@@ -28,21 +28,23 @@ local function readVault()
         return nil, "Invalid vault capacity or contents"
     end
 
-    local stats = { capacity = capacity, used = 0, total = 0, types = 0, top = {} }
-    local counts = {}
+    local stats = {
+        capacity = capacity,
+        used = 0,
+        total = 0,
+        types = 0,
+        largestStack = 0,
+    }
+    local itemTypes = {}
     for _, item in pairs(items) do
         stats.used = stats.used + 1
         stats.total = stats.total + item.count
-        counts[item.name] = (counts[item.name] or 0) + item.count
+        stats.largestStack = math.max(stats.largestStack, item.count)
+        itemTypes[item.name] = true
     end
-    for name, count in pairs(counts) do
+    for _ in pairs(itemTypes) do
         stats.types = stats.types + 1
-        stats.top[#stats.top + 1] = { name = name, count = count }
     end
-    table.sort(stats.top, function(a, b)
-        if a.count == b.count then return a.name < b.name end
-        return a.count > b.count
-    end)
     return stats
 end
 
@@ -103,28 +105,12 @@ local function draw(monitor, stats, problem)
     if #typesText > width then typesText = types .. " types" end
     row(7, typesText, colors.cyan)
 
+    local averageStack = stats.used > 0 and stats.total / stats.used or 0
     if height >= 9 then
-        row(9, (" TOP ITEMS " .. string.rep(" ", width)):sub(1, width),
-            colors.white, colors.gray)
-        if #stats.top == 0 then
-            row(10, " Empty vault", colors.lightGray)
-        else
-            for i = 1, math.min(#stats.top, height - 9) do
-                local item = stats.top[i]
-                local count = formatNumber(item.count)
-                local prefix = " " .. i .. ". "
-                local available = width - #prefix - #count - 1
-                if available > 0 then
-                    local name = item.name
-                    if #name > available then
-                        name = available > 1 and name:sub(1, available - 1) .. "~" or "~"
-                    end
-                    row(9 + i, prefix .. name .. string.rep(" ", available - #name + 1) .. count)
-                else
-                    row(9 + i, count .. " " .. item.name)
-                end
-            end
-        end
+        row(9, string.format(" Avg stack: %.1f items", averageStack), colors.lightGray)
+    end
+    if height >= 10 then
+        row(10, " Largest stack: " .. formatNumber(stats.largestStack), colors.lightGray)
     end
 end
 
