@@ -2,6 +2,7 @@
 local MONITOR_SIDE = "top"               -- Monitor peripheral name/side
 local VAULT_NAME = "create:item_vault_0" -- Inventory peripheral name
 local REFRESH_INTERVAL = 5                -- Seconds between inventory scans
+local SLOTS_PER_VAULT_BLOCK = 20
 -- ===================================================
 
 local function formatNumber(amount)
@@ -31,16 +32,38 @@ local function readVault()
     local stats = {
         capacity = capacity,
         used = 0,
+        fullSlots = 0,
+        fullSlotsKnown = true,
         total = 0,
         types = 0,
         largestStack = 0,
     }
     local itemTypes = {}
-    for _, item in pairs(items) do
+    for slot, item in pairs(items) do
         stats.used = stats.used + 1
         stats.total = stats.total + item.count
         stats.largestStack = math.max(stats.largestStack, item.count)
         itemTypes[item.name] = true
+
+        local stackLimit
+        if type(vault.getItemDetail) == "function" then
+            local okDetail, detail = pcall(vault.getItemDetail, slot)
+            if not okDetail then return nil, "Cannot read item details; retrying" end
+            stackLimit = detail and detail.maxCount
+        end
+        if (type(stackLimit) ~= "number" or stackLimit <= 0)
+            and type(vault.getItemLimit) == "function" then
+            local okLimit, limit = pcall(vault.getItemLimit, slot)
+            if not okLimit then return nil, "Cannot read slot limits; retrying" end
+            stackLimit = limit
+        end
+        if type(stackLimit) == "number" and stackLimit > 0 then
+            if item.count >= stackLimit then
+                stats.fullSlots = stats.fullSlots + 1
+            end
+        else
+            stats.fullSlotsKnown = false
+        end
     end
     for _ in pairs(itemTypes) do
         stats.types = stats.types + 1
@@ -62,75 +85,120 @@ local function draw(monitor, stats, problem)
         monitor.write(text:sub(1, width))
     end
 
-    local function section(y, text)
-        row(y, (" " .. text .. string.rep(" ", width)):sub(1, width),
-            colors.white, colors.gray)
-    end
-
-    local function metric(y, label, value, foreground, compactLabel)
-        local text = " " .. label .. ": " .. value
-        if #text > width and compactLabel then
-            text = " " .. compactLabel .. ": " .. value
+    local function wrapped(y, text, foreground)
+        local line = ""
+        local function emit()
+            if line ~= "" then
+                row(y, line, foreground)
+                y = y + 1
+                line = ""
+            end
         end
-        row(y, text, foreground)
+
+        for word in text:gmatch("%S+") do
+            while #word > width do
+                emit()
+                line = word:sub(1, width)
+                emit()
+                word = word:sub(width + 1)
+            end
+            if line == "" then
+                line = word
+            elseif #line + #word + 1 <= width then
+                line = line .. " " .. word
+            else
+                emit()
+                line = word
+            end
+        end
+        emit()
+        return y
     end
 
-    row(1, (" ITEM VAULT " .. string.rep(" ", width)):sub(1, width),
-        colors.yellow, colors.gray)
+    local function section(y, text)
+        if width < 2 then
+            text = ""
+        elseif width <= 5 then
+            text = ({
+                ["ITEM VAULT"] = "V",
+                INVENTORY = "I",
+                ["STACK DETAILS"] = "S",
+            })[text]
+        elseif #text + 1 > width then
+            text = ({
+                ["ITEM VAULT"] = "VAULT",
+                INVENTORY = "ITEMS",
+                ["STACK DETAILS"] = width == 6 and "STACK" or "STACKS",
+            })[text] or text
+        end
+        local label = " " .. text
+        if #label > width then label = label:sub(1, width) end
+        row(y, label .. string.rep(" ", width - #label), colors.white, colors.gray)
+        return y + 1
+    end
+
+    local function metric(y, label, value, foreground)
+        return wrapped(y, label .. ": " .. value, foreground)
+    end
+
+    section(1, "ITEM VAULT")
     if problem then
-        row(3, problem, colors.red)
-        row(4, "Check connection; retrying", colors.lightGray)
+        wrapped(3, problem, colors.red)
+        wrapped(4, "Check connection; retrying", colors.lightGray)
         return
     end
 
     local occupiedPercent = math.min(100, stats.used / stats.capacity * 100)
-    local roomStatus = "ROOM AVAILABLE"
+    local roomStatus = "SPACE AVAILABLE"
     local statusColor = colors.lime
     if occupiedPercent >= 95 then
-        roomStatus = "ALMOST FULL"
+        roomStatus = "NEARLY FULL"
         statusColor = colors.red
     elseif occupiedPercent >= 80 then
         roomStatus = "LOW SPACE"
         statusColor = colors.orange
     end
-    local statusText = string.format(" %s  %.1f%% slots used", roomStatus, occupiedPercent)
-    if #statusText > width then
-        statusText = string.format("%.1f%% used", occupiedPercent)
-    end
-    row(2, statusText, statusColor)
+    local y = wrapped(2,
+        string.format("%s - %.1f%% slots used", roomStatus, occupiedPercent), statusColor)
 
-    if height >= 3 then
+    if y <= height then
         local filled = math.floor(width * occupiedPercent / 100 + 0.5)
-        monitor.setCursorPos(1, 3)
+        monitor.setCursorPos(1, y)
         monitor.setBackgroundColor(statusColor)
         monitor.write(string.rep(" ", filled))
         monitor.setBackgroundColor(colors.gray)
         monitor.write(string.rep(" ", width - filled))
         monitor.setBackgroundColor(colors.black)
+        y = y + 1
     end
 
     local used, capacity = formatNumber(stats.used), formatNumber(stats.capacity)
     local free, total, types = formatNumber(math.max(0, stats.capacity - stats.used)),
         formatNumber(stats.total), formatNumber(stats.types)
-    metric(4, "Occupied slots", used .. "/" .. capacity, nil, "Slots")
-    metric(5, "Empty slots", free, colors.lightGray, "Empty")
-    if height >= 6 then
-        section(6, "INVENTORY")
+    y = math.max(y, 4)
+    y = metric(y, "Occupied slots", used .. " / " .. capacity)
+    y = metric(y, "Empty slots", free, colors.lightGray)
+    if stats.fullSlotsKnown then
+        y = metric(y, "Full stacks", formatNumber(stats.fullSlots) .. " / " .. used,
+            colors.lime)
+        local fullBlocks = math.floor(stats.fullSlots / SLOTS_PER_VAULT_BLOCK)
+        local totalBlocks = math.ceil(stats.capacity / SLOTS_PER_VAULT_BLOCK)
+        y = metric(y, "Full block equivalents",
+            formatNumber(fullBlocks) .. " / " .. formatNumber(totalBlocks)
+                .. " (20 full stacks each)", colors.lime)
+    else
+        y = metric(y, "Full stacks", "Unavailable (stack limits not exposed)", colors.orange)
+        y = metric(y, "Full block equivalents", "Unavailable", colors.orange)
     end
-    metric(7, "Items stored", total, colors.yellow, "Items")
-    metric(8, "Item types", types, colors.cyan, "Types")
 
-    if height >= 11 then
-        section(10, "STACK DETAILS")
-    end
-    if height >= 11 then
-        local averageStack = stats.used > 0 and stats.total / stats.used or 0
-        metric(11, "Avg items per occupied slot", string.format("%.1f", averageStack),
-            colors.lightGray, "Avg/slot")
-    end
-    if height >= 12 then
-        metric(12, "Largest stack", formatNumber(stats.largestStack), colors.lightGray, "Largest")
-    end
+    y = section(y, "INVENTORY")
+    y = metric(y, "Items stored", total, colors.yellow)
+    y = metric(y, "Item types", types, colors.cyan)
+    y = section(y, "STACK DETAILS")
+    local averageStack = stats.used > 0 and stats.total / stats.used or 0
+    y = metric(y, "Average items per occupied slot", string.format("%.1f", averageStack),
+        colors.lightGray)
+    metric(y, "Largest stack", formatNumber(stats.largestStack), colors.lightGray)
 end
 
 local lastMonitorError
