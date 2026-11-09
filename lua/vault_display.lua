@@ -21,10 +21,7 @@ local lastProblem
 local function elapsedLabel()
     if not lastRefreshAt then return "Updated: never" end
     local seconds = math.max(0, math.floor((os.epoch("utc") - lastRefreshAt) / 1000))
-    if seconds < 60 then return "Updated now" end
-    if seconds < 3600 then return "Updated " .. math.floor(seconds / 60) .. "m ago" end
-    if seconds < 86400 then return "Updated " .. math.floor(seconds / 3600) .. "h ago" end
-    return "Updated " .. math.floor(seconds / 86400) .. "d ago"
+    return string.format("Updated %dm %02ds ago", math.floor(seconds / 60), seconds % 60)
 end
 
 local function sameSnapshot(first, second)
@@ -137,13 +134,15 @@ local function drawFooter(monitor, progress, frame)
     local width, height = monitor.getSize()
     if height < 1 then return end
 
+    local buttonWidth = width >= 24 and #REFRESH_BUTTON or 0
+    local barWidth = width - buttonWidth
     local text
     local foreground = colors.lightGray
     if progress.problem then
         text = "Update failed: " .. progress.problem
         foreground = colors.red
     elseif progress.done then
-        text = "Up to date"
+        text = elapsedLabel()
         foreground = colors.lime
     elseif progress.total > 0 then
         local percent = math.floor(progress.processed / progress.total * 100)
@@ -165,15 +164,21 @@ local function drawFooter(monitor, progress, frame)
     if height >= 2 then
         local filled = 0
         if progress.total > 0 and not progress.done then
-            filled = math.floor(width * progress.processed / progress.total)
+            filled = math.floor(barWidth * progress.processed / progress.total)
         elseif progress.done and not progress.problem then
-            filled = width
+            filled = barWidth
         end
         monitor.setCursorPos(1, height)
         monitor.setBackgroundColor(colors.lime)
         monitor.write(string.rep(" ", filled))
         monitor.setBackgroundColor(colors.gray)
-        monitor.write(string.rep(" ", width - filled))
+        monitor.write(string.rep(" ", barWidth - filled))
+        if buttonWidth > 0 then
+            monitor.setCursorPos(barWidth + 1, height)
+            monitor.setTextColor(colors.white)
+            monitor.setBackgroundColor(colors.gray)
+            monitor.write(REFRESH_BUTTON)
+        end
     end
     monitor.setBackgroundColor(colors.black)
 end
@@ -218,18 +223,6 @@ local function drawFirstScanSpinner(monitor, frame)
     end
 
     monitor.setBackgroundColor(colors.black)
-end
-
-local function drawAge(monitor)
-    local width, height = monitor.getSize()
-    if height < 2 then return end
-
-    local text = elapsedLabel()
-    if #text > width then text = text:sub(1, width) end
-    monitor.setCursorPos(width - #text + 1, 2)
-    monitor.setTextColor(colors.lightGray)
-    monitor.setBackgroundColor(colors.black)
-    monitor.write(text .. string.rep(" ", width - #text))
 end
 
 local function draw(monitor, stats, problem, progress)
@@ -304,22 +297,13 @@ local function draw(monitor, stats, problem, progress)
     end
 
     section(1, "ITEM VAULT")
-    if width >= 24 then
-        local buttonX = width - #REFRESH_BUTTON + 1
-        monitor.setCursorPos(buttonX, 1)
-        monitor.setTextColor(colors.lime)
-        monitor.setBackgroundColor(colors.gray)
-        monitor.write(REFRESH_BUTTON)
-    end
     if problem and not stats then
         wrapped(3, problem, colors.red)
         wrapped(4, "Check connection; retrying", colors.lightGray)
-        drawAge(monitor)
         drawFooter(monitor, progress, 0)
         return
     elseif not stats then
         drawFirstScanSpinner(monitor, progress.frame or 0)
-        drawAge(monitor)
         drawFooter(monitor, progress, 0)
         return
     end
@@ -335,7 +319,6 @@ local function draw(monitor, stats, problem, progress)
         statusColor = colors.orange
     end
     row(2, string.format("%s - %.1f%% slots used", roomStatus, occupiedPercent), statusColor)
-    drawAge(monitor)
     local y = 3
 
     local fullSlots = stats.fullSlotsKnown and stats.fullSlots or 0
@@ -404,6 +387,7 @@ local lastMonitorError
 local cachedStats
 local cachedSnapshot
 local stackLimitCache = {}
+local displayProgress = { done = true }
 
 local function scanWithProgress(monitor, progress)
     progress.phase = "Reading vault"
@@ -411,6 +395,7 @@ local function scanWithProgress(monitor, progress)
     progress.total = 0
     progress.done = false
     progress.problem = nil
+    displayProgress = progress
 
     local stats, snapshot
 
@@ -433,7 +418,6 @@ local function scanWithProgress(monitor, progress)
         local frame = 0
         while not progress.done do
             if monitor then
-                pcall(drawAge, monitor)
                 if not cachedStats then
                     progress.frame = frame
                     pcall(drawFirstScanSpinner, monitor, frame)
@@ -476,7 +460,6 @@ local function refresh()
     progress.done = true
     progress.problem = problem
     if stats and progress.phase == "No changes" then
-        drawAge(monitor)
         drawFooter(monitor, progress, 0)
         lastMonitorError = false
         return
@@ -501,14 +484,14 @@ while true do
         ageTimer = os.startTimer(1)
     elseif event == "timer" and value == ageTimer then
         local monitor = peripheral.wrap(MONITOR_SIDE)
-        if monitor then pcall(drawAge, monitor) end
+        if monitor then pcall(drawFooter, monitor, displayProgress, 0) end
         ageTimer = os.startTimer(1)
-    elseif event == "monitor_touch" and value == MONITOR_SIDE and y == 1 then
+    elseif event == "monitor_touch" and value == MONITOR_SIDE then
         local monitor = peripheral.wrap(MONITOR_SIDE)
         if monitor then
-            local width = monitor.getSize()
+            local width, height = monitor.getSize()
             local buttonX = width - #REFRESH_BUTTON + 1
-            if width >= 24 and x >= buttonX then
+            if width >= 24 and y == height and x >= buttonX then
                 os.cancelTimer(timer)
                 refresh()
                 timer = os.startTimer(REFRESH_INTERVAL)
@@ -518,8 +501,8 @@ while true do
     elseif event == "monitor_resize" and value == MONITOR_SIDE then
         local monitor = peripheral.wrap(MONITOR_SIDE)
         if monitor then
-            local progress = { done = true, problem = lastProblem }
-            pcall(draw, monitor, cachedStats, lastProblem, progress)
+            displayProgress.problem = lastProblem
+            pcall(draw, monitor, cachedStats, lastProblem, displayProgress)
         end
     end
 end
