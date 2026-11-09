@@ -62,7 +62,20 @@ local function draw(monitor, stats, problem)
         monitor.write(text:sub(1, width))
     end
 
-    row(1, (" VAULT MONITOR " .. string.rep(" ", width)):sub(1, width),
+    local function section(y, text)
+        row(y, (" " .. text .. string.rep(" ", width)):sub(1, width),
+            colors.white, colors.gray)
+    end
+
+    local function metric(y, label, value, foreground, compactLabel)
+        local text = " " .. label .. ": " .. value
+        if #text > width and compactLabel then
+            text = " " .. compactLabel .. ": " .. value
+        end
+        row(y, text, foreground)
+    end
+
+    row(1, (" ITEM VAULT " .. string.rep(" ", width)):sub(1, width),
         colors.yellow, colors.gray)
     if problem then
         row(3, problem, colors.red)
@@ -71,14 +84,19 @@ local function draw(monitor, stats, problem)
     end
 
     local occupiedPercent = math.min(100, stats.used / stats.capacity * 100)
+    local roomStatus = "ROOM AVAILABLE"
     local statusColor = colors.lime
     if occupiedPercent >= 95 then
+        roomStatus = "ALMOST FULL"
         statusColor = colors.red
     elseif occupiedPercent >= 80 then
+        roomStatus = "LOW SPACE"
         statusColor = colors.orange
     end
-    local statusText = string.format(" SLOTS OCCUPIED  %.1f%%", occupiedPercent)
-    if #statusText > width then statusText = string.format("%.1f%% slots used", occupiedPercent) end
+    local statusText = string.format(" %s  %.1f%% slots used", roomStatus, occupiedPercent)
+    if #statusText > width then
+        statusText = string.format("%.1f%% used", occupiedPercent)
+    end
     row(2, statusText, statusColor)
 
     if height >= 3 then
@@ -94,26 +112,24 @@ local function draw(monitor, stats, problem)
     local used, capacity = formatNumber(stats.used), formatNumber(stats.capacity)
     local free, total, types = formatNumber(math.max(0, stats.capacity - stats.used)),
         formatNumber(stats.total), formatNumber(stats.types)
-    local slotsText = " Occupied slots: " .. used .. " / " .. capacity
-    if #slotsText > width then slotsText = used .. " of " .. capacity .. " slots" end
-    row(4, slotsText)
-    local freeText = " Empty slots: " .. free
-    if #freeText > width then freeText = free .. " empty" end
-    row(5, freeText, colors.lightGray)
-    row(6, " Items stored: " .. total, colors.yellow)
-    local typesText = " Item types: " .. types
-    if #typesText > width then typesText = types .. " types" end
-    row(7, typesText, colors.cyan)
+    metric(4, "Occupied slots", used .. "/" .. capacity, nil, "Slots")
+    metric(5, "Empty slots", free, colors.lightGray, "Empty")
+    if height >= 6 then
+        section(6, "INVENTORY")
+    end
+    metric(7, "Items stored", total, colors.yellow, "Items")
+    metric(8, "Item types", types, colors.cyan, "Types")
 
-    local averageStack = stats.used > 0 and stats.total / stats.used or 0
-    if height >= 8 then
-        row(8, "Bar shows occupied slots, not item capacity", colors.gray)
+    if height >= 11 then
+        section(10, "STACK DETAILS")
     end
-    if height >= 9 then
-        row(9, string.format(" Avg stack: %.1f items", averageStack), colors.lightGray)
+    if height >= 11 then
+        local averageStack = stats.used > 0 and stats.total / stats.used or 0
+        metric(11, "Avg items per occupied slot", string.format("%.1f", averageStack),
+            colors.lightGray, "Avg/slot")
     end
-    if height >= 10 then
-        row(10, " Largest stack: " .. formatNumber(stats.largestStack), colors.lightGray)
+    if height >= 12 then
+        metric(12, "Largest stack", formatNumber(stats.largestStack), colors.lightGray, "Largest")
     end
 end
 
