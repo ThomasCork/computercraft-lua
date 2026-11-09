@@ -1,8 +1,9 @@
 -- ================= CONFIGURATION =================
 local MONITOR_SIDE = "top"               -- Monitor peripheral name/side
 local VAULT_NAME = "create:item_vault_0" -- Inventory peripheral name
-local REFRESH_INTERVAL = 5                -- Seconds between inventory scans
+local REFRESH_INTERVAL = 120              -- Seconds between inventory scans
 local SLOTS_PER_VAULT_BLOCK = 20
+local REFRESH_BUTTON = "[REFRESH]"
 -- ===================================================
 
 local function formatNumber(amount)
@@ -12,6 +13,18 @@ local function formatNumber(amount)
         formatted, replacements = formatted:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
         if replacements == 0 then return formatted end
     end
+end
+
+local lastRefreshAt
+local lastProblem
+
+local function elapsedLabel()
+    if not lastRefreshAt then return "Updated: never" end
+    local seconds = math.max(0, math.floor((os.epoch("utc") - lastRefreshAt) / 1000))
+    if seconds < 60 then return "Updated now" end
+    if seconds < 3600 then return "Updated " .. math.floor(seconds / 60) .. "m ago" end
+    if seconds < 86400 then return "Updated " .. math.floor(seconds / 3600) .. "h ago" end
+    return "Updated " .. math.floor(seconds / 86400) .. "d ago"
 end
 
 local function sameSnapshot(first, second)
@@ -207,6 +220,18 @@ local function drawFirstScanSpinner(monitor, frame)
     monitor.setBackgroundColor(colors.black)
 end
 
+local function drawAge(monitor)
+    local width, height = monitor.getSize()
+    if height < 2 then return end
+
+    local text = elapsedLabel()
+    if #text > width then text = text:sub(1, width) end
+    monitor.setCursorPos(width - #text + 1, 2)
+    monitor.setTextColor(colors.lightGray)
+    monitor.setBackgroundColor(colors.black)
+    monitor.write(text .. string.rep(" ", width - #text))
+end
+
 local function draw(monitor, stats, problem, progress)
     local width, height = monitor.getSize()
     local contentHeight = math.max(0, height - 2)
@@ -279,13 +304,22 @@ local function draw(monitor, stats, problem, progress)
     end
 
     section(1, "ITEM VAULT")
+    if width >= 24 then
+        local buttonX = width - #REFRESH_BUTTON + 1
+        monitor.setCursorPos(buttonX, 1)
+        monitor.setTextColor(colors.lime)
+        monitor.setBackgroundColor(colors.gray)
+        monitor.write(REFRESH_BUTTON)
+    end
     if problem and not stats then
         wrapped(3, problem, colors.red)
         wrapped(4, "Check connection; retrying", colors.lightGray)
+        drawAge(monitor)
         drawFooter(monitor, progress, 0)
         return
     elseif not stats then
         drawFirstScanSpinner(monitor, progress.frame or 0)
+        drawAge(monitor)
         drawFooter(monitor, progress, 0)
         return
     end
@@ -300,8 +334,9 @@ local function draw(monitor, stats, problem, progress)
         roomStatus = "LOW SPACE"
         statusColor = colors.orange
     end
-    local y = wrapped(2,
-        string.format("%s - %.1f%% slots used", roomStatus, occupiedPercent), statusColor)
+    row(2, string.format("%s - %.1f%% slots used", roomStatus, occupiedPercent), statusColor)
+    drawAge(monitor)
+    local y = 3
 
     local fullSlots = stats.fullSlotsKnown and stats.fullSlots or 0
     local partialSlots = stats.used - fullSlots
@@ -398,6 +433,7 @@ local function scanWithProgress(monitor, progress)
         local frame = 0
         while not progress.done do
             if monitor then
+                pcall(drawAge, monitor)
                 if not cachedStats then
                     progress.frame = frame
                     pcall(drawFirstScanSpinner, monitor, frame)
@@ -423,21 +459,28 @@ local function refresh()
         return
     end
     local progress = { phase = "Reading vault", processed = 0, total = 0, done = false }
-    local ok, drawError = pcall(draw, monitor, cachedStats, nil, progress)
-    if not ok then
-        if not lastMonitorError then
+    if not cachedStats then
+        local ok, drawError = pcall(draw, monitor, nil, nil, progress)
+        if not ok and not lastMonitorError then
             print("Cannot draw vault display: " .. tostring(drawError))
         end
-        lastMonitorError = true
     end
 
     local stats, snapshot, problem = scanWithProgress(monitor, progress)
     if stats then
         cachedStats = stats
         cachedSnapshot = snapshot
+        lastRefreshAt = os.epoch("utc")
     end
+    lastProblem = problem
     progress.done = true
     progress.problem = problem
+    if stats and progress.phase == "No changes" then
+        drawAge(monitor)
+        drawFooter(monitor, progress, 0)
+        lastMonitorError = false
+        return
+    end
     local drawOk, err = pcall(draw, monitor, cachedStats, problem, progress)
     if not drawOk then
         if not lastMonitorError then print("Cannot draw to monitor: " .. tostring(err)) end
@@ -449,13 +492,34 @@ end
 
 refresh()
 local timer = os.startTimer(REFRESH_INTERVAL)
+local ageTimer = os.startTimer(1)
 while true do
-    local event, value = os.pullEvent()
+    local event, value, x, y = os.pullEvent()
     if event == "timer" and value == timer then
         refresh()
         timer = os.startTimer(REFRESH_INTERVAL)
-    elseif event == "monitor_resize" and value == MONITOR_SIDE
-        or event == "peripheral" or event == "peripheral_detach" then
-        refresh()
+        ageTimer = os.startTimer(1)
+    elseif event == "timer" and value == ageTimer then
+        local monitor = peripheral.wrap(MONITOR_SIDE)
+        if monitor then pcall(drawAge, monitor) end
+        ageTimer = os.startTimer(1)
+    elseif event == "monitor_touch" and value == MONITOR_SIDE and y == 1 then
+        local monitor = peripheral.wrap(MONITOR_SIDE)
+        if monitor then
+            local width = monitor.getSize()
+            local buttonX = width - #REFRESH_BUTTON + 1
+            if width >= 24 and x >= buttonX then
+                os.cancelTimer(timer)
+                refresh()
+                timer = os.startTimer(REFRESH_INTERVAL)
+                ageTimer = os.startTimer(1)
+            end
+        end
+    elseif event == "monitor_resize" and value == MONITOR_SIDE then
+        local monitor = peripheral.wrap(MONITOR_SIDE)
+        if monitor then
+            local progress = { done = true, problem = lastProblem }
+            pcall(draw, monitor, cachedStats, lastProblem, progress)
+        end
     end
 end
