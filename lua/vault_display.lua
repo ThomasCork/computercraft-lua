@@ -1,188 +1,149 @@
 -- ================= CONFIGURATION =================
-local MONITOR_SIDE = "top"               -- Your monitor peripheral name/side
-local VAULT_NAME = "create:item_vault_0" -- Your exact vault peripheral name
+local MONITOR_SIDE = "top"               -- Monitor peripheral name/side
+local VAULT_NAME = "create:item_vault_0" -- Inventory peripheral name
+local REFRESH_INTERVAL = 5                -- Seconds between inventory scans
 -- ===================================================
 
-local args = { ... }
--- Defaults to 54 blocks based on your setup, or change via command line (e.g. "vault 54")
-local VAULT_BLOCKS = tonumber(args[1]) or 54 
-
-local monitor = peripheral.wrap(MONITOR_SIDE)
-local vault = peripheral.wrap(VAULT_NAME)
-
-if not monitor then
-    print("Error: Monitor not found on '" .. MONITOR_SIDE .. "'!")
-    return
-end
-
-if not vault then
-    print("Error: Vault not found at '" .. VAULT_NAME .. "'!")
-    return
-end
-
--- Helper function to format numbers with commas
 local function formatNumber(amount)
     local formatted = tostring(amount)
-    while true do  
-        local k
-        formatted, k = string.gsub(formatted, "^(-?%d+)(%d%d%d)", '%1,%2')
-        if (k == 0) then break end
+    while true do
+        local replacements
+        formatted, replacements = formatted:gsub("^(-?%d+)(%d%d%d)", "%1,%2")
+        if replacements == 0 then return formatted end
     end
-    return formatted
 end
 
--- Helper function to draw a chunky, 2-line tall split progress bar (Green used / Red unused)
-local function drawTallProgressBar(x, startY, width, fillPercent)
-    if width < 5 then return end
-    
-    local filledChars = math.floor((width * fillPercent) / 100)
-    local emptyChars = width - filledChars
-    
-    -- Draw top row of the thick bar
-    monitor.setCursorPos(x, startY)
-    if filledChars > 0 then
-        monitor.setBackgroundColor(colors.green)
-        monitor.write(string.rep(" ", filledChars))
+local function readVault()
+    local vault = peripheral.wrap(VAULT_NAME)
+    if not vault then return nil, "Vault not found: " .. VAULT_NAME end
+    if type(vault.size) ~= "function" or type(vault.list) ~= "function" then
+        return nil, "Vault needs inventory size and list methods"
     end
-    if emptyChars > 0 then
-        monitor.setBackgroundColor(colors.red)
-        monitor.write(string.rep(" ", emptyChars))
+
+    local ok, capacity, items = pcall(function()
+        return vault.size(), vault.list()
+    end)
+    if not ok then return nil, "Cannot read vault; retrying" end
+    if type(capacity) ~= "number" or capacity <= 0 or type(items) ~= "table" then
+        return nil, "Invalid vault capacity or contents"
     end
-    
-    -- Draw bottom row of the thick bar
-    monitor.setCursorPos(x, startY + 1)
-    if filledChars > 0 then
-        monitor.setBackgroundColor(colors.lime)
-        monitor.write(string.rep(" ", filledChars))
+
+    local stats = { capacity = capacity, used = 0, total = 0, types = 0, top = {} }
+    local counts = {}
+    for _, item in pairs(items) do
+        stats.used = stats.used + 1
+        stats.total = stats.total + item.count
+        counts[item.name] = (counts[item.name] or 0) + item.count
     end
-    if emptyChars > 0 then
-        monitor.setBackgroundColor(colors.brown) -- Darker red/brown hue for depth
-        monitor.write(string.rep(" ", emptyChars))
+    for name, count in pairs(counts) do
+        stats.types = stats.types + 1
+        stats.top[#stats.top + 1] = { name = name, count = count }
     end
-    
+    table.sort(stats.top, function(a, b)
+        if a.count == b.count then return a.name < b.name end
+        return a.count > b.count
+    end)
+    return stats
+end
+
+local function draw(monitor, stats, problem)
+    local width, height = monitor.getSize()
     monitor.setBackgroundColor(colors.black)
-end
-
-while true do
+    monitor.setTextColor(colors.white)
     monitor.clear()
-    
-    local screenWidth, screenHeight = monitor.getSize()
-    local maxCapacitySlots = VAULT_BLOCKS * 20
-    
-    -- Scan vault contents
-    local items = vault.list()
-    local usedSlots = 0
-    local totalIndividualItems = 0
-    local uniqueTypes = 0
-    
-    for slot, item in pairs(items) do
-        usedSlots = usedSlots + 1
-        totalIndividualItems = totalIndividualItems + item.count
-        uniqueTypes = uniqueTypes + 1
+
+    local function row(y, text, foreground, background)
+        if y < 1 or y > height then return end
+        monitor.setCursorPos(1, y)
+        monitor.setTextColor(foreground or colors.white)
+        monitor.setBackgroundColor(background or colors.black)
+        monitor.write(text:sub(1, width))
     end
-    
-    if usedSlots > maxCapacitySlots then
-        usedSlots = maxCapacitySlots
+
+    row(1, (" VAULT MONITOR " .. string.rep(" ", width)):sub(1, width),
+        colors.yellow, colors.gray)
+    if problem then
+        row(3, problem, colors.red)
+        row(4, "Check connection; retrying", colors.lightGray)
+        return
     end
-    
-    local freeSlots = maxCapacitySlots - usedSlots
-    local fillPercent = math.min(100, (usedSlots / maxCapacitySlots) * 100)
-    local fillPercentRounded = math.floor(fillPercent + 0.5)
-    
-    -- ================= UI RENDERING =================
-    
-    -- 1. Distinct Header Section (Solid Background Banner)
-    monitor.setBackgroundColor(colors.gray)
-    monitor.setCursorPos(1, 1)
-    monitor.write(string.rep(" ", screenWidth))
-    monitor.setCursorPos(1, 2)
-    monitor.write(string.rep(" ", screenWidth))
-    
-    local title = "CREATE STORAGE VAULT"
-    local titleX = math.floor((screenWidth - string.len(title)) / 2) + 1
-    monitor.setCursorPos(titleX, 1)
-    monitor.setTextColor(colors.yellow)
-    monitor.write(title)
-    
-    local subTitle = "SYSTEM MONITOR"
-    local subX = math.floor((screenWidth - string.len(subTitle)) / 2) + 1
-    monitor.setCursorPos(subX, 2)
-    monitor.setTextColor(colors.lightGray)
-    monitor.write(subTitle)
-    
-    monitor.setBackgroundColor(colors.black)
-    
-    -- 2. Core Stats Section
-    local leftMargin = 3
-    
-    monitor.setCursorPos(leftMargin, 4)
-    monitor.setTextColor(colors.white)
-    monitor.write("Status:      ")
-    if fillPercentRounded >= 95 then
-        monitor.setTextColor(colors.red)
-        monitor.write("CRITICAL (" .. fillPercentRounded .. "%)")
-    elseif fillPercentRounded >= 80 then
-        monitor.setTextColor(colors.orange)
-        monitor.write("WARNING (" .. fillPercentRounded .. "%)")
+
+    local percent = math.min(100, stats.used / stats.capacity * 100)
+    local status, statusColor = "HEALTHY", colors.lime
+    if percent >= 95 then
+        status, statusColor = "CRITICAL", colors.red
+    elseif percent >= 80 then
+        status, statusColor = "WARNING", colors.orange
+    end
+    row(2, string.format(" %s  %.1f%% full", status, percent), statusColor)
+
+    if height >= 3 then
+        local filled = math.floor(width * percent / 100 + 0.5)
+        monitor.setCursorPos(1, 3)
+        monitor.setBackgroundColor(statusColor)
+        monitor.write(string.rep(" ", filled))
+        monitor.setBackgroundColor(colors.gray)
+        monitor.write(string.rep(" ", width - filled))
+        monitor.setBackgroundColor(colors.black)
+    end
+
+    row(4, " Slots: " .. formatNumber(stats.used) .. " / " .. formatNumber(stats.capacity))
+    row(5, " Free slots: " .. formatNumber(math.max(0, stats.capacity - stats.used)), colors.lightGray)
+    row(6, " Items: " .. formatNumber(stats.total), colors.yellow)
+    row(7, " Item types: " .. formatNumber(stats.types), colors.cyan)
+
+    if height >= 9 then
+        row(9, (" TOP ITEMS " .. string.rep(" ", width)):sub(1, width),
+            colors.white, colors.gray)
+        if #stats.top == 0 then
+            row(10, " Vault is empty", colors.lightGray)
+        else
+            for i = 1, math.min(#stats.top, height - 9) do
+                local item = stats.top[i]
+                local count = formatNumber(item.count)
+                local prefix = " " .. i .. ". "
+                local available = width - #prefix - #count - 1
+                if available > 0 then
+                    local name = item.name
+                    if #name > available then
+                        name = available > 1 and name:sub(1, available - 1) .. "~" or "~"
+                    end
+                    row(9 + i, prefix .. name .. string.rep(" ", available - #name + 1) .. count)
+                else
+                    row(9 + i, count .. " " .. item.name)
+                end
+            end
+        end
+    end
+end
+
+local lastMonitorError
+local function refresh()
+    local monitor = peripheral.wrap(MONITOR_SIDE)
+    if not monitor then
+        if not lastMonitorError then print("Monitor not found: " .. MONITOR_SIDE .. "; retrying") end
+        lastMonitorError = true
+        return
+    end
+    local stats, problem = readVault()
+    local ok = pcall(draw, monitor, stats, problem)
+    if not ok then
+        if not lastMonitorError then print("Cannot draw to monitor; retrying") end
+        lastMonitorError = true
     else
-        monitor.setTextColor(colors.lime)
-        monitor.write("OPTIMAL (" .. fillPercentRounded .. "%)")
+        lastMonitorError = false
     end
-    
-    -- Green (Used Slots) / Red (Total Max Slots)
-    monitor.setCursorPos(leftMargin, 5)
-    monitor.setTextColor(colors.white)
-    monitor.write("Capacity:    ")
-    monitor.setTextColor(colors.green)
-    monitor.write(formatNumber(usedSlots) .. " stacks")
-    monitor.setTextColor(colors.lightGray)
-    monitor.write(" / ")
-    monitor.setTextColor(colors.red)
-    monitor.write(formatNumber(maxCapacitySlots) .. " max")
-    
-    monitor.setCursorPos(leftMargin, 6)
-    monitor.setTextColor(colors.white)
-    monitor.write("Total Items: ")
-    monitor.setTextColor(colors.yellow)
-    monitor.write(formatNumber(totalIndividualItems) .. " items")
-    
-    monitor.setCursorPos(leftMargin, 7)
-    monitor.setTextColor(colors.white)
-    monitor.write("Unique Types:")
-    monitor.setTextColor(colors.cyan)
-    monitor.write(" " .. formatNumber(uniqueTypes) .. " types")
-    
-    -- 3. Extended Analytics Section
-    monitor.setCursorPos(leftMargin, 9)
-    monitor.setTextColor(colors.lightGray)
-    monitor.write("--- EXTENDED ANALYTICS ---")
-    
-    monitor.setCursorPos(leftMargin, 10)
-    monitor.setTextColor(colors.white)
-    monitor.write("Free Space:   ")
-    monitor.setTextColor(colors.lime)
-    monitor.write(formatNumber(freeSlots) .. " stacks")
-    
-    monitor.setCursorPos(leftMargin, 11)
-    monitor.setTextColor(colors.white)
-    monitor.write("Vault Size:   ")
-    monitor.setTextColor(colors.lightGray)
-    monitor.write(VAULT_BLOCKS .. " blocks")
-    
-    -- 4. Thick 2-Line Progress Bar at the bottom
-    local barWidth = screenWidth - 6
-    if screenHeight >= 15 and barWidth > 5 then
-        drawTallProgressBar(3, 13, barWidth, fillPercent)
-        
-        -- Percentage indicators underneath the chunky bar
-        monitor.setCursorPos(3, 16)
-        monitor.setTextColor(colors.green)
-        monitor.write("0%")
-        
-        local pText = fillPercentRounded .. "% Full"
-        monitor.setCursorPos(math.floor((screenWidth - string.len(pText)) / 2) + 1, 16)
-        monitor.setTextColor(colors.white)
-        monitor.write(pText)
-        
-        monitor.setCursorPos(screenWidth - 3, 16)
-        monitor.setTextColor(colors
+end
+
+refresh()
+local timer = os.startTimer(REFRESH_INTERVAL)
+while true do
+    local event, value = os.pullEvent()
+    if event == "timer" and value == timer then
+        timer = os.startTimer(REFRESH_INTERVAL)
+        refresh()
+    elseif event == "monitor_resize" and value == MONITOR_SIDE
+        or event == "peripheral" or event == "peripheral_detach" then
+        refresh()
+    end
+end
