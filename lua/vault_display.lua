@@ -165,6 +165,46 @@ local function drawFooter(monitor, progress, frame)
     monitor.setBackgroundColor(colors.black)
 end
 
+local function drawFirstScanSpinner(monitor, frame)
+    local width, height = monitor.getSize()
+    local contentHeight = math.max(0, height - 2)
+    if width < 1 or contentHeight < 1 then return end
+
+    local centerX = math.floor((width + 1) / 2)
+    local centerY = math.floor((contentHeight + 1) / 2)
+    local positions = {
+        { -2, -1 }, { 0, -1 }, { 2, -1 }, { 2, 0 },
+        { 2, 1 }, { 0, 1 }, { -2, 1 }, { -2, 0 },
+    }
+
+    if width >= 5 and contentHeight >= 3 then
+        for i, position in ipairs(positions) do
+            local x, y = centerX + position[1], centerY + position[2]
+            monitor.setCursorPos(x, y)
+            monitor.setTextColor(i == frame % #positions + 1 and colors.lime or colors.gray)
+            monitor.write(i == frame % #positions + 1 and "*" or ".")
+        end
+        monitor.setCursorPos(centerX, centerY)
+        monitor.setTextColor(colors.yellow)
+        monitor.write("+")
+    else
+        local spinner = { "|", "/", "-", "\\" }
+        monitor.setCursorPos(centerX, centerY)
+        monitor.setTextColor(colors.lime)
+        monitor.write(spinner[frame % #spinner + 1])
+    end
+
+    local label = "Loading inventory..."
+    local labelY = centerY + 2
+    if labelY <= contentHeight then
+        local labelX = math.max(1, math.floor((width - #label) / 2) + 1)
+        monitor.setCursorPos(labelX, labelY)
+        monitor.setTextColor(colors.lightGray)
+        monitor.write(label:sub(1, width - labelX + 1))
+    end
+    monitor.setBackgroundColor(colors.black)
+end
+
 local function draw(monitor, stats, problem, progress)
     local width, height = monitor.getSize()
     local contentHeight = math.max(0, height - 2)
@@ -243,7 +283,7 @@ local function draw(monitor, stats, problem, progress)
         drawFooter(monitor, progress, 0)
         return
     elseif not stats then
-        wrapped(3, "Waiting for first inventory scan", colors.yellow)
+        drawFirstScanSpinner(monitor, 0)
         drawFooter(monitor, progress, 0)
         return
     end
@@ -355,7 +395,12 @@ local function scanWithProgress(monitor, progress)
     local function showProgress()
         local frame = 0
         while not progress.done do
-            if monitor then pcall(drawFooter, monitor, progress, frame) end
+            if monitor then
+                if not cachedStats then
+                    pcall(drawFirstScanSpinner, monitor, frame)
+                end
+                pcall(drawFooter, monitor, progress, frame)
+            end
             frame = frame + 1
             sleep(0.25)
         end
