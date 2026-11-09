@@ -70,19 +70,19 @@ local function draw(monitor, stats, problem)
         return
     end
 
-    local percent = math.min(100, stats.used / stats.capacity * 100)
-    local status, statusColor = "HEALTHY", colors.lime
-    if percent >= 95 then
-        status, statusColor = "CRITICAL", colors.red
-    elseif percent >= 80 then
-        status, statusColor = "WARNING", colors.orange
+    local occupiedPercent = math.min(100, stats.used / stats.capacity * 100)
+    local statusColor = colors.lime
+    if occupiedPercent >= 95 then
+        statusColor = colors.red
+    elseif occupiedPercent >= 80 then
+        statusColor = colors.orange
     end
-    local statusText = string.format(" %s  %.1f%% full", status, percent)
-    if #statusText > width then statusText = string.format("%.1f%% %s", percent, status) end
+    local statusText = string.format(" SLOTS OCCUPIED  %.1f%%", occupiedPercent)
+    if #statusText > width then statusText = string.format("%.1f%% slots used", occupiedPercent) end
     row(2, statusText, statusColor)
 
     if height >= 3 then
-        local filled = math.floor(width * percent / 100 + 0.5)
+        local filled = math.floor(width * occupiedPercent / 100 + 0.5)
         monitor.setCursorPos(1, 3)
         monitor.setBackgroundColor(statusColor)
         monitor.write(string.rep(" ", filled))
@@ -94,18 +94,21 @@ local function draw(monitor, stats, problem)
     local used, capacity = formatNumber(stats.used), formatNumber(stats.capacity)
     local free, total, types = formatNumber(math.max(0, stats.capacity - stats.used)),
         formatNumber(stats.total), formatNumber(stats.types)
-    local slotsText = " Slots: " .. used .. " / " .. capacity
-    if #slotsText > width then slotsText = used .. "/" .. capacity .. " slots" end
+    local slotsText = " Occupied slots: " .. used .. " / " .. capacity
+    if #slotsText > width then slotsText = used .. " of " .. capacity .. " slots" end
     row(4, slotsText)
-    local freeText = " Free slots: " .. free
-    if #freeText > width then freeText = free .. " free" end
+    local freeText = " Empty slots: " .. free
+    if #freeText > width then freeText = free .. " empty" end
     row(5, freeText, colors.lightGray)
-    row(6, " Items: " .. total, colors.yellow)
+    row(6, " Items stored: " .. total, colors.yellow)
     local typesText = " Item types: " .. types
     if #typesText > width then typesText = types .. " types" end
     row(7, typesText, colors.cyan)
 
     local averageStack = stats.used > 0 and stats.total / stats.used or 0
+    if height >= 8 then
+        row(8, "Bar shows occupied slots, not item capacity", colors.gray)
+    end
     if height >= 9 then
         row(9, string.format(" Avg stack: %.1f items", averageStack), colors.lightGray)
     end
