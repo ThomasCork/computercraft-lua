@@ -39,24 +39,13 @@ local function readVault()
         largestStack = 0,
     }
     local itemTypes = {}
-    for slot, item in pairs(items) do
+    for _, item in pairs(items) do
         stats.used = stats.used + 1
         stats.total = stats.total + item.count
         stats.largestStack = math.max(stats.largestStack, item.count)
         itemTypes[item.name] = true
 
         local stackLimit = item.maxCount
-        if type(vault.getItemDetail) == "function" then
-            local okDetail, detail = pcall(vault.getItemDetail, slot)
-            if okDetail and detail then
-                stackLimit = detail.maxCount
-            end
-        end
-        if (type(stackLimit) ~= "number" or stackLimit <= 0)
-            and type(vault.getItemLimit) == "function" then
-            local okLimit, limit = pcall(vault.getItemLimit, slot)
-            if okLimit then stackLimit = limit end
-        end
         if type(stackLimit) == "number" and stackLimit > 0 then
             if item.count >= stackLimit then
                 stats.fullSlots = stats.fullSlots + 1
@@ -161,15 +150,33 @@ local function draw(monitor, stats, problem)
     local y = wrapped(2,
         string.format("%s - %.1f%% slots used", roomStatus, occupiedPercent), statusColor)
 
+    local fullSlots = stats.fullSlotsKnown and stats.fullSlots or 0
+    local partialSlots = stats.used - fullSlots
+    local fullWidth = math.min(width,
+        math.floor(width * fullSlots / stats.capacity + 0.5))
+    local partialWidth = math.min(width - fullWidth,
+        math.floor(width * partialSlots / stats.capacity + 0.5))
+    local emptyWidth = width - fullWidth - partialWidth
+    local function drawBarRow(row)
+        local x = 1
+        local function segment(color, cells)
+            if cells > 0 then
+                monitor.setCursorPos(x, row)
+                monitor.setBackgroundColor(color)
+                monitor.write(string.rep(" ", cells))
+                x = x + cells
+            end
+        end
+        segment(colors.lime, fullWidth)
+        segment(colors.green, partialWidth)
+        segment(colors.gray, emptyWidth)
+    end
+
     if y <= height then
-        local filled = math.floor(width * occupiedPercent / 100 + 0.5)
-        monitor.setCursorPos(1, y)
-        monitor.setBackgroundColor(statusColor)
-        monitor.write(string.rep(" ", filled))
-        monitor.setBackgroundColor(colors.gray)
-        monitor.write(string.rep(" ", width - filled))
+        drawBarRow(y)
+        if y + 1 <= height then drawBarRow(y + 1) end
         monitor.setBackgroundColor(colors.black)
-        y = y + 1
+        y = y + 2
     end
 
     local used, capacity = formatNumber(stats.used), formatNumber(stats.capacity)
@@ -181,18 +188,21 @@ local function draw(monitor, stats, problem)
     if stats.fullSlotsKnown then
         y = metric(y, "Full stacks", formatNumber(stats.fullSlots) .. " / " .. used,
             colors.lime)
+        y = metric(y, "Occupied, not full",
+            formatNumber(math.max(0, stats.used - stats.fullSlots)), colors.green)
         local fullBlocks = math.floor(stats.fullSlots / SLOTS_PER_VAULT_BLOCK)
         local totalBlocks = math.ceil(stats.capacity / SLOTS_PER_VAULT_BLOCK)
         y = metric(y, "Full block equivalents",
             formatNumber(fullBlocks) .. " / " .. formatNumber(totalBlocks)
                 .. " (20 full stacks each)", colors.lime)
     else
-        y = metric(y, "Full stacks", "Unavailable (stack limits not exposed)", colors.orange)
+        y = metric(y, "Full stacks", "Unknown (stack limits unavailable)", colors.lime)
+        y = metric(y, "Occupied, not full", "Unknown", colors.green)
         y = metric(y, "Full block equivalents", "Unavailable", colors.orange)
     end
 
     y = section(y, "INVENTORY")
-    y = metric(y, "Items stored", total, colors.yellow)
+    y = metric(y, "Total items stored", total, colors.yellow)
     y = metric(y, "Item types", types, colors.cyan)
     y = section(y, "STACK DETAILS")
     local averageStack = stats.used > 0 and stats.total / stats.used or 0
@@ -224,8 +234,8 @@ local timer = os.startTimer(REFRESH_INTERVAL)
 while true do
     local event, value = os.pullEvent()
     if event == "timer" and value == timer then
-        timer = os.startTimer(REFRESH_INTERVAL)
         refresh()
+        timer = os.startTimer(REFRESH_INTERVAL)
     elseif event == "monitor_resize" and value == MONITOR_SIDE
         or event == "peripheral" or event == "peripheral_detach" then
         refresh()
