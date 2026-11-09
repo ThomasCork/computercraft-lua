@@ -75,7 +75,9 @@ local function draw(monitor, stats, problem)
     elseif percent >= 80 then
         status, statusColor = "WARNING", colors.orange
     end
-    row(2, string.format(" %s  %.1f%% full", status, percent), statusColor)
+    local statusText = string.format(" %s  %.1f%% full", status, percent)
+    if #statusText > width then statusText = string.format("%.1f%% %s", percent, status) end
+    row(2, statusText, statusColor)
 
     if height >= 3 then
         local filled = math.floor(width * percent / 100 + 0.5)
@@ -87,16 +89,25 @@ local function draw(monitor, stats, problem)
         monitor.setBackgroundColor(colors.black)
     end
 
-    row(4, " Slots: " .. formatNumber(stats.used) .. " / " .. formatNumber(stats.capacity))
-    row(5, " Free slots: " .. formatNumber(math.max(0, stats.capacity - stats.used)), colors.lightGray)
-    row(6, " Items: " .. formatNumber(stats.total), colors.yellow)
-    row(7, " Item types: " .. formatNumber(stats.types), colors.cyan)
+    local used, capacity = formatNumber(stats.used), formatNumber(stats.capacity)
+    local free, total, types = formatNumber(math.max(0, stats.capacity - stats.used)),
+        formatNumber(stats.total), formatNumber(stats.types)
+    local slotsText = " Slots: " .. used .. " / " .. capacity
+    if #slotsText > width then slotsText = used .. "/" .. capacity .. " slots" end
+    row(4, slotsText)
+    local freeText = " Free slots: " .. free
+    if #freeText > width then freeText = free .. " free" end
+    row(5, freeText, colors.lightGray)
+    row(6, " Items: " .. total, colors.yellow)
+    local typesText = " Item types: " .. types
+    if #typesText > width then typesText = types .. " types" end
+    row(7, typesText, colors.cyan)
 
     if height >= 9 then
         row(9, (" TOP ITEMS " .. string.rep(" ", width)):sub(1, width),
             colors.white, colors.gray)
         if #stats.top == 0 then
-            row(10, " Vault is empty", colors.lightGray)
+            row(10, " Empty vault", colors.lightGray)
         else
             for i = 1, math.min(#stats.top, height - 9) do
                 local item = stats.top[i]
