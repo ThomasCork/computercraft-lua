@@ -78,8 +78,8 @@ local function run(config)
             eventIndex = eventIndex + 1
             local event = config.events and config.events[eventIndex]
             if not event then error("test finished") end
-            if event.action then event.action(devices, newMonitor, framesByName) end
             if event.time then time = event.time end
+            if event.action then event.action(devices, newMonitor, framesByName) end
             return table.unpack(event)
         end,
     }
@@ -132,6 +132,9 @@ local frames = run({
 local result = frames[findFrame(frames, "Full: 1 Used: 2 Empty: 8")]
 local display = frameText(result)
 check(display:find("VAULTS: 4", 1, true), "wrong vault count")
+check(display:find("Vault 1", 1, true) and display:find("Vault 4", 1, true),
+    "vaults should have numbered labels")
+check(not display:find("create:item_vault_", 1, true), "peripheral name shown instead of label")
 check(display:find("Full: 1 Used: 1 Empty: 4", 1, true), "unstackable item not full")
 check(display:find("Full: ? Used: 1 Empty: 3", 1, true), "unknown limit not shown")
 check(display:find("Cannot read inventory:", 1, true), "vault failure not shown")
@@ -165,7 +168,7 @@ frames = run({
     },
 })
 local removed = findFrame(frames, "No item vaults found")
-local added = findFrame(frames, "create:item_vault_12", removed + 1)
+local added = findFrame(frames, "Vault 1", removed + 1)
 findFrame(frames, "Full: 1 Used: 2 Empty: 8", added + 1)
 
 frames = run({
@@ -182,8 +185,8 @@ frames = run({
 local first = findFrame(frames, "Full: 1 Used: 2 Empty: 8")
 check(frameText(frames[first]):find("Full: 1 Used: 2 Empty: 8", 1, true),
     "vault details split across pages unnecessarily")
-local second = findFrame(frames, "create:item_vault_2", first + 1)
-findFrame(frames, "create:item_vault_1", second + 1)
+local second = findFrame(frames, "Vault 2", first + 1)
+findFrame(frames, "Vault 1", second + 1)
 
 run({
     width = 1, height = 1,
@@ -210,9 +213,9 @@ frames = run({
     },
 })
 local firstRemote = findFrame(frames, "Full: 1 Used: 2 Empty: 8")
-local secondRemote = findFrame(frames, "create:item_vault_2", firstRemote + 1)
+local secondRemote = findFrame(frames, "Vault 2", firstRemote + 1)
 check(secondRemote > firstRemote, "touch from selected monitor did not change page")
-findFrame(frames, "create:item_vault_2", secondRemote + 1)
+findFrame(frames, "Vault 2", secondRemote + 1)
 
 local _, monitorFrames = run({
     noMonitor = true,
@@ -236,8 +239,8 @@ local _, monitorFrames = run({
     },
 })
 check(#monitorFrames["monitor_8"] >= 4, "existing monitor should stay selected on attach")
-findFrame(monitorFrames["monitor_2"], "create:item_vault_1")
-findFrame(monitorFrames["monitor_9"], "create:item_vault_1")
+findFrame(monitorFrames["monitor_2"], "Vault 1")
+findFrame(monitorFrames["monitor_9"], "Vault 1")
 
 local calls = {}
 local largeItems = {}
@@ -271,7 +274,7 @@ frames = run({
 })
 local partial = findFrame(frames, "Full: ? Used: 103 Empty: 17")
 local complete = findFrame(frames, "Full: 1 Used: 1 Empty: 1", partial + 1)
-check(frameText(frames[partial]):find("create:item_vault_5", 1, true),
+check(frameText(frames[partial]):find("Vault 2", 1, true),
     "all discovered vaults should be displayed before details are read")
 check(complete > partial, "occupancy should be visible before the scan completes")
 check(calls["minecraft:stone"] == 2, "stack limit was not cached once per scan")
@@ -289,5 +292,25 @@ local fullResult = findFrame(frames, "Full: 51 Used: 101 Empty: 19")
 findFrame(frames, "Full: 1 Used: 1 Empty: 1", fullResult)
 check(calls["minecraft:stone"] == 3, "stack limit was not reused between vaults")
 check(calls["minecraft:stonevariant"] == 3, "variant stack limit was not refreshed")
+
+for _, refreshEvent in ipairs({
+    { "timer", 1 },
+    { "monitor_touch", "top", 10, 15 },
+    { "peripheral", "top" },
+}) do
+    refreshEvent.time = 5000
+    run({
+        devices = { ["create:item_vault_4"] = device(vaultA) },
+        events = {
+            refreshEvent,
+            { "timer", 4, time = 67000 },
+            { "test", action = function(_, _, screens)
+                local frame = screens.top[#screens.top]
+                check(frameText(frame):find("Updated 1m 02s ago", 1, true),
+                    "refresh age did not update after " .. refreshEvent[1])
+            end },
+        },
+    })
+end
 
 print("vault_display tests passed")

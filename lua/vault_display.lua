@@ -159,9 +159,9 @@ local function makePages(width, contentHeight)
         text(discoveryProblem, colors.red)
     end
 
-    for _, vault in ipairs(vaults) do
+    for index, vault in ipairs(vaults) do
         startGroup()
-        text(vault.name, colors.white)
+        text("Vault " .. index, colors.white)
         local stats = vault.stats
         if not stats then
             text(vault.waiting and "Waiting to scan" or (vault.problem or "Vault scan failed"),
@@ -343,8 +343,10 @@ local clock = os.startTimer(1)
 while true do
     local event, value, x, y = os.pullEvent()
     if event == "timer" and value == timer then
+        os.cancelTimer(clock)
         refresh()
         timer = os.startTimer(REFRESH_INTERVAL)
+        clock = os.startTimer(1)
     elseif event == "timer" and value == clock then
         local pageChanged = false
         if pageCount > 1 and os.epoch("utc") - lastPageAt >= PAGE_INTERVAL * 1000 then
@@ -359,8 +361,10 @@ while true do
             monitorName = nil
         end
         os.cancelTimer(timer)
+        os.cancelTimer(clock)
         refresh()
         timer = os.startTimer(REFRESH_INTERVAL)
+        clock = os.startTimer(1)
     elseif event == "monitor_resize" and value == monitorName then
         show()
     elseif event == "monitor_touch" and value == monitorName then
@@ -374,8 +378,10 @@ while true do
                         and x <= #SHORT_CONTROLS)
                 if refreshPressed then
                     os.cancelTimer(timer)
+                    os.cancelTimer(clock)
                     refresh()
                     timer = os.startTimer(REFRESH_INTERVAL)
+                    clock = os.startTimer(1)
                 else
                     if width >= #CONTROLS and x <= 3 then
                         page = (page - 2) % pageCount + 1
