@@ -16,6 +16,7 @@ local monitorName
 local page = 1
 local pageCount = 1
 local lastPageAt = 0
+local scanning = false
 
 local function formatNumber(amount)
     local formatted = tostring(amount)
@@ -26,7 +27,7 @@ local function formatNumber(amount)
     end
 end
 
-local function readVault(name)
+local function readVault(name, stackLimits, update)
     local vault = peripheral.wrap(name)
     if not vault then return nil, "Vault disconnected" end
     if type(vault.size) ~= "function" or type(vault.list) ~= "function" then
@@ -42,7 +43,7 @@ local function readVault(name)
         return nil, "Invalid inventory capacity or contents"
     end
 
-    local stats = { capacity = capacity, used = 0, full = 0, fullKnown = true }
+    local stats = { capacity = capacity, used = 0, full = 0, fullKnown = false }
     for slot, item in pairs(items) do
         if type(slot) ~= "number" or slot % 1 ~= 0 or slot < 1 or slot > capacity
             or type(item) ~= "table" or type(item.count) ~= "number"
@@ -50,25 +51,49 @@ local function readVault(name)
             return nil, "Invalid inventory slot or item count"
         end
         stats.used = stats.used + 1
+    end
+    update(stats, 0)
 
+    local fullKnown = true
+    local processed = 0
+    local lastUpdate = os.epoch("utc")
+    for slot, item in pairs(items) do
         local limit = item.maxCount
         if (type(limit) ~= "number" or limit <= 0)
             and type(vault.getItemDetail) == "function" then
-            local detailOk, detail = pcall(vault.getItemDetail, slot)
-            if detailOk and type(detail) == "table" then limit = detail.maxCount end
+            local key
+            if type(item.name) == "string" and (item.nbt == nil or type(item.nbt) == "string") then
+                key = item.name .. "\0" .. (item.nbt or "")
+            end
+            if key and stackLimits[key] ~= nil then
+                limit = stackLimits[key]
+            else
+                local detailOk, detail = pcall(vault.getItemDetail, slot)
+                if detailOk and type(detail) == "table" then limit = detail.maxCount end
+                if type(limit) ~= "number" or limit <= 0 then limit = false end
+                if key then stackLimits[key] = limit end
+            end
         end
         if type(limit) ~= "number" or limit <= 0 then
-            stats.fullKnown = false
+            fullKnown = false
         elseif item.count >= limit then
             stats.full = stats.full + 1
         end
+        processed = processed + 1
+        local now = os.epoch("utc")
+        if now - lastUpdate >= 1000 then
+            update(stats, processed)
+            lastUpdate = now
+        end
     end
+    stats.fullKnown = fullKnown
     return stats
 end
 
-local function scanVaults()
+local function scanVaults(update)
     local results = {}
     local problems = {}
+    local stackLimits = {}
     local names = peripheral.getNames()
     table.sort(names)
     for _, name in ipairs(names) do
@@ -76,15 +101,27 @@ local function scanVaults()
         if not ok then
             problems[#problems + 1] = "Cannot identify " .. name .. ": " .. tostring(isVault)
         elseif isVault then
-            local scanOk, stats, problem = pcall(readVault, name)
-            if not scanOk then
-                problem = "Scan failed: " .. tostring(stats)
-                stats = nil
-            end
-            results[#results + 1] = { name = name, stats = stats, problem = problem }
+            results[#results + 1] = { name = name, waiting = true }
         end
     end
-    return results, #problems > 0 and table.concat(problems, "; ") or nil
+    local problem = #problems > 0 and table.concat(problems, "; ") or nil
+    update(results, problem, "Scanning vaults...")
+    for index, result in ipairs(results) do
+        result.waiting = false
+        local scanOk, stats, scanProblem = pcall(readVault, result.name, stackLimits,
+            function(partial, processed)
+                result.stats = partial
+                update(results, problem, string.format("Vault %d/%d: %s/%s slots",
+                    index, #results, formatNumber(processed), formatNumber(partial.used)))
+            end)
+        if not scanOk then
+            scanProblem = "Scan failed: " .. tostring(stats)
+            stats = nil
+        end
+        result.stats, result.problem = stats, scanProblem
+        update(results, problem, string.format("Scanned %d/%d vaults", index, #results))
+    end
+    return results, problem
 end
 
 local function layout(height)
@@ -114,7 +151,8 @@ local function makePages(width, contentHeight)
 
     if #vaults == 0 and not discoveryProblem then
         startGroup()
-        text("No item vaults found. Check the wired connection.", colors.yellow)
+        text(scanning and "Discovering vaults..." or
+            "No item vaults found. Check the wired connection.", colors.yellow)
     end
     if discoveryProblem then
         startGroup()
@@ -126,7 +164,8 @@ local function makePages(width, contentHeight)
         text(vault.name, colors.white)
         local stats = vault.stats
         if not stats then
-            text(vault.problem or "Vault scan failed", colors.red)
+            text(vault.waiting and "Waiting to scan" or (vault.problem or "Vault scan failed"),
+                vault.waiting and colors.yellow or colors.red)
         else
             local empty = stats.capacity - stats.used
             if stats.fullKnown then
@@ -277,8 +316,13 @@ local function show(status, footerOnly)
 end
 
 local function refresh()
+    scanning = true
     show("Scanning vaults...")
-    local ok, results, problem = pcall(scanVaults)
+    local ok, results, problem = pcall(scanVaults, function(partial, issue, status)
+        vaults = partial
+        discoveryProblem = issue
+        show(status)
+    end)
     if ok then
         vaults = results
         discoveryProblem = problem
@@ -287,6 +331,7 @@ local function refresh()
         discoveryProblem = "Discovery failed: " .. tostring(results)
         print(discoveryProblem)
     end
+    scanning = false
     page = 1
     lastPageAt = os.epoch("utc")
     show()

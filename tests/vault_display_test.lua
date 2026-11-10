@@ -78,7 +78,7 @@ local function run(config)
             eventIndex = eventIndex + 1
             local event = config.events and config.events[eventIndex]
             if not event then error("test finished") end
-            if event.action then event.action(devices, newMonitor) end
+            if event.action then event.action(devices, newMonitor, framesByName) end
             if event.time then time = event.time end
             return table.unpack(event)
         end,
@@ -149,6 +149,7 @@ end
 check(foundBar, "full, partial and empty bar segments are incorrect")
 
 local devices = { ["create:item_vault_0"] = device(vaultA) }
+local beforeOtherTouch
 frames = run({
     devices = devices,
     events = {
@@ -178,7 +179,7 @@ frames = run({
         { "timer", 2, time = 11000 },
     },
 })
-local first = findFrame(frames, "create:item_vault_1")
+local first = findFrame(frames, "Full: 1 Used: 2 Empty: 8")
 check(frameText(frames[first]):find("Full: 1 Used: 2 Empty: 8", 1, true),
     "vault details split across pages unnecessarily")
 local second = findFrame(frames, "create:item_vault_2", first + 1)
@@ -198,14 +199,19 @@ frames = run({
         ["create:item_vault_2"] = device(vaultB),
     },
     events = {
-        { "monitor_touch", "other_monitor", 4, 7 },
-        { "monitor_touch", "monitor_4", 4, 7 },
+        { "monitor_touch", "other_monitor", 4, 7, action = function(_, _, screens)
+            beforeOtherTouch = #screens["monitor_4"]
+        end },
+        { "monitor_touch", "monitor_4", 4, 7, action = function(_, _, screens)
+            check(#screens["monitor_4"] == beforeOtherTouch,
+                "touch from another monitor affected display")
+        end },
         { "monitor_resize", "monitor_4" },
     },
 })
-local firstRemote = findFrame(frames, "create:item_vault_1")
+local firstRemote = findFrame(frames, "Full: 1 Used: 2 Empty: 8")
 local secondRemote = findFrame(frames, "create:item_vault_2", firstRemote + 1)
-check(secondRemote == firstRemote + 1, "touch from another monitor affected display")
+check(secondRemote > firstRemote, "touch from selected monitor did not change page")
 findFrame(frames, "create:item_vault_2", secondRemote + 1)
 
 local _, monitorFrames = run({
@@ -232,5 +238,56 @@ local _, monitorFrames = run({
 check(#monitorFrames["monitor_8"] >= 4, "existing monitor should stay selected on attach")
 findFrame(monitorFrames["monitor_2"], "create:item_vault_1")
 findFrame(monitorFrames["monitor_9"], "create:item_vault_1")
+
+local calls = {}
+local largeItems = {}
+for slot = 1, 100 do
+    largeItems[slot] = { name = "minecraft:stone", count = slot <= 50 and 64 or 1 }
+end
+largeItems[101] = { name = "minecraft:stone", nbt = "variant", count = 1 }
+largeItems[102] = { name = "example:unknown", count = 1 }
+largeItems[103] = { name = "example:unknown", count = 1 }
+local largeVault = {
+    size = function() return 120 end,
+    list = function() return largeItems end,
+    getItemDetail = function(slot)
+        local item = largeItems[slot]
+        local key = item.name .. (item.nbt or "")
+        calls[key] = (calls[key] or 0) + 1
+        if item.name == "example:unknown" then error("detail unavailable") end
+        return { maxCount = item.nbt and 1 or 64 }
+    end,
+}
+local secondVault = inventory(2, {
+    [1] = { name = "minecraft:stone", count = 64 },
+}, {})
+frames = run({
+    height = 15,
+    devices = {
+        ["create:item_vault_4"] = device(largeVault),
+        ["create:item_vault_5"] = device(secondVault),
+    },
+    events = { { "monitor_touch", "top", 10, 15 } },
+})
+local partial = findFrame(frames, "Full: ? Used: 103 Empty: 17")
+local complete = findFrame(frames, "Full: 1 Used: 1 Empty: 1", partial + 1)
+check(frameText(frames[partial]):find("create:item_vault_5", 1, true),
+    "all discovered vaults should be displayed before details are read")
+check(complete > partial, "occupancy should be visible before the scan completes")
+check(calls["minecraft:stone"] == 2, "stack limit was not cached once per scan")
+check(calls["minecraft:stonevariant"] == 2, "item variants shared a stack limit")
+check(calls["example:unknown"] == 2, "failed lookups were not cached once per scan")
+
+largeItems[102], largeItems[103] = nil, nil
+frames = run({
+    devices = {
+        ["create:item_vault_4"] = device(largeVault),
+        ["create:item_vault_5"] = device(secondVault),
+    },
+})
+local fullResult = findFrame(frames, "Full: 51 Used: 101 Empty: 19")
+findFrame(frames, "Full: 1 Used: 1 Empty: 1", fullResult)
+check(calls["minecraft:stone"] == 3, "stack limit was not reused between vaults")
+check(calls["minecraft:stonevariant"] == 3, "variant stack limit was not refreshed")
 
 print("vault_display tests passed")
